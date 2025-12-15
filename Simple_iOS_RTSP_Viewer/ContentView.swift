@@ -19,10 +19,18 @@ struct ContentView: View {
             TextField("Enter RTSP URL", text: $url)
                 .textFieldStyle(.roundedBorder)
                 .submitLabel(.done)
-                .onSubmit { vm.connect(url: url) }
+                .onSubmit {
+                    Task {
+                        await vm.connect(url: url)
+                    }
+                }
             
             HStack {
-                Button("Connect") { vm.connect(url: url) }
+                Button("Connect") {
+                    Task {
+                        await vm.connect(url: url)
+                    }
+                }
                 Button("Disconnect") { vm.disconnect() }
             }
 

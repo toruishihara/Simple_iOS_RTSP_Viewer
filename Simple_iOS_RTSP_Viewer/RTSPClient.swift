@@ -9,17 +9,7 @@ import Foundation
 import CryptoKit
 
 final class RTSPClient {
-    enum State {
-        case idle
-        case connecting
-        case connected
-        case error(String)
-    }
-    enum RTSPError: Error {
-        case notConnected
-        case connectionClosed
-    }
-    
+    private var client: TCPClient
     private let urlString: String
     private var host = ""
     private var port: Int = 554
@@ -38,21 +28,25 @@ final class RTSPClient {
     private(set) var state: State = .idle
     private var onState: ((State) -> Void)?
     
-    private var inputStream: InputStream?
-    private var outputStream: OutputStream?
+    //private var inputStream: InputStream?
+    //private var outputStream: OutputStream?
+    enum State {
+        case idle
+        case connecting
+        case connected
+        case error(String)
+    }
+    enum RTSPError: Error {
+        case notConnected
+        case connectionClosed
+    }
     
+
     init(urlString: String, rtpPort: Int, onState: ((State) -> Void)? = nil) {
         self.urlString = urlString
         self.rtpPort = rtpPort
         self.rtcpPort = rtpPort + 1
         self.onState = onState
-    }
-    
-    func connect() {
-        guard case .idle = state else { return }
-        
-        setState(.connecting)
-        
         if let url = URL(string: urlString) {
             host = url.host ?? ""
             port = url.port ?? 554
@@ -65,28 +59,43 @@ final class RTSPClient {
             print("user:", username ?? "")
             print("password:", password ?? "")
             print("path:", path)
-            print("rtspURLNoCreds:", rtspURLNoCreds)
             
-            
-            var readStream: Unmanaged<CFReadStream>?
-            var writeStream: Unmanaged<CFWriteStream>?
-            
-            CFStreamCreatePairWithSocketToHost(
-                nil,
-                host as CFString,
-                UInt32(port),
-                &readStream,
-                &writeStream
-            )
-            
-            inputStream = readStream?.takeRetainedValue()
-            outputStream = writeStream?.takeRetainedValue()
-            
-            inputStream?.open()
-            outputStream?.open()
-            
-            setState(.connected)
+            client = TCPClient(host: host, port: port)
+        } else {
+            client = TCPClient(host: "127.0.0.1", port: 554)
         }
+    }
+    
+    func connect() async {
+        guard case .idle = state else { return }
+        
+        setState(.connecting)
+        
+            do {
+                try await self.client.connect()
+            } catch {
+                print("client.connect failed:", error)
+            }
+            
+            //var readStream: Unmanaged<CFReadStream>?
+            //var writeStream: Unmanaged<CFWriteStream>?
+            
+            //CFStreamCreatePairWithSocketToHost(
+            //    nil,
+            //    host as CFString,
+            //    UInt32(port),
+            //    &readStream,
+            //    &writeStream
+            //)
+            
+            //inputStream = readStream?.takeRetainedValue()
+            //outputStream = writeStream?.takeRetainedValue()
+            
+            //inputStream?.open()
+            //outputStream?.open()
+            
+            //setState(.connected)
+        //}
     }
     
     func disconnect() {
@@ -102,73 +111,47 @@ final class RTSPClient {
         state = s
         onState?(s)
     }
-    
-    func sendAndReceive(_ request: String) throws -> String {
-        guard let output = outputStream,
-              let input = inputStream else {
-            throw RTSPError.notConnected
-        }
         
-        let data = request.data(using: .utf8)!
-        print("Call output.write:" + request)
-        _ = data.withUnsafeBytes {
-            output.write($0.bindMemory(to: UInt8.self).baseAddress!, maxLength: data.count)
-        }
-        
-        var response = ""
-        var buffer = [UInt8](repeating: 0, count: 4096)
-        
-        while true {
-            print("Call input.read")
-            let len = input.read(&buffer, maxLength: buffer.count)
-            print("res len=", len)
-            if len <= 0 { break }
-            
-            response += String(decoding: buffer.prefix(len), as: UTF8.self)
-            print(response)
-            
-            // RTSP headers end with CRLF CRLF
-            if response.contains("\r\n\r\n") {
-                break
-            }
-        }
-        
-        if response.isEmpty {
-            throw RTSPError.connectionClosed
-        }
-        
-        return response
-    }
-    
-    func start() {
+    func start() async {
         let userAgent = "LibVLC/3.0.18 (LIVE555 Streaming Media v2016.11.28)"
         let user = "long"
         let pass = "short"
         let urlStr = "rtsp://192.168.0.120:554/live/ch1"
+        
         let req0 =
 """
-OPTIONS \(urlStr) RTSP/1.0\r
-CSeq: 2\r
-User-Agent: \(userAgent) \r
-\r
+OPTIONS \(urlStr) RTSP/1.0\r\n
+CSeq: 1\r\n
+User-Agent: \(userAgent)\r\n
+\r\n
 """
-        let req1 =
-"""
-DESCRIBE \(urlStr) RTSP/1.0\r
-CSeq: 3\r
-User-Agent: \(userAgent) \r
-Accept: application/sdp\r
-\r
-"""
-        
         do {
-            let res0 = try sendAndReceive(req0)
-            //print("res0=" + res0)
+            try await client.send(req0)
+            let resData0 = try await client.readUntil(
+                Data("\r\n\r\n".utf8),
+                timeoutSeconds: 5.0
+            )
+            let res0 = String(decoding: resData0, as: UTF8.self)
+            print("res0=" + res0)
             if (!res0.contains("200 OK") || !res0.contains("DESCRIBE") || !res0.contains("PLAY")) {
                 return
             }
-            let res1 = try sendAndReceive(req1)
-            //print("res1=" + res1)
+            let req1 =
+"""
+DESCRIBE \(urlStr) RTSP/1.0\r\n
+CSeq: 3\r\n
+User-Agent: \(userAgent) \r\n
+Accept: application/sdp\r\n
+\r\n
+"""
+
+            try await client.send(req1)
+            let resData1 = try await client.readUntil(
+                Data("\r\n\r\n".utf8),
+                timeoutSeconds: 5.0
+            )
+            let res1 = String(decoding: resData1, as: UTF8.self)
+            print("res1=" + res1)
             if (!res1.contains("401")) {
                 return
             }
@@ -179,15 +162,20 @@ Accept: application/sdp\r
             let response2 = digestResponse(username: user, password: pass, realm: params.realm!, nonce: params.nonce!, method: "DESCRIBE", uri: urlStr)
             let req2 =
 """
-DESCRIBE \(urlStr) RTSP/1.0\r
-CSeq: 4\r
-Authorization: Digest username="\(user)", realm="\(params.realm!)", nonce="\(params.nonce!)", uri="\(urlStr)", response="\(response2)"\r
-User-Agent: \(userAgent)\r
-Accept: application/sdp\r
-\r
+DESCRIBE \(urlStr) RTSP/1.0\r\n
+CSeq: 4\r\n
+Authorization: Digest username="\(user)", realm="\(params.realm!)", nonce="\(params.nonce!)", uri="\(urlStr)", response="\(response2)"\r\n
+User-Agent: \(userAgent)\r\n
+Accept: application/sdp\r\n
+\r\n
 """
-            let res2 = try sendAndReceive(req2)
-            //print("res2=" + res2)
+            try await client.send(req2)
+            let resData2 = try await client.readUntil(
+                Data("\r\n\r\n".utf8),
+                timeoutSeconds: 5.0
+            )
+            let res2 = String(decoding: resData2, as: UTF8.self)
+            print("res2=" + res2)
             if (!res2.contains("200 OK")) {
                 return
             }
@@ -195,18 +183,23 @@ Accept: application/sdp\r
             let response3 = digestResponse(username: user, password: pass, realm: params.realm!, nonce: params.nonce!, method: "SETUP", uri: urlStr)
             let req3 =
 """
-SETUP \(urlStr)/track0 RTSP/1.0\r
-CSeq: 5\r
-Authorization: Digest username="\(user)", realm="\(params.realm!)", nonce="\(params.nonce!)", uri="\(urlStr)", response="\(response3)"\r
-User-Agent: \(userAgent)\r
-Transport: RTP/AVP;unicast;client_port=\(rtpPort)-\(rtcpPort)
+SETUP \(urlStr)/track0 RTSP/1.0\r\n
+CSeq: 5\r\n
+Authorization: Digest username="\(user)", realm="\(params.realm!)", nonce="\(params.nonce!)", uri="\(urlStr)", response="\(response3)"\r\n
+User-Agent: \(userAgent)\r\n
+Transport: RTP/AVP;unicast;client_port=\(rtpPort)-\(rtcpPort)\r\n
+\r\n
 """
-            let res3 = try sendAndReceive(req3)
+            try await client.send(req3)
+            let resData3 = try await client.readUntil(
+                Data("\r\n\r\n".utf8),
+                timeoutSeconds: 5.0
+            )
+            let res3 = String(decoding: resData3, as: UTF8.self)
             print("res3=" + res3)
             if (!res3.contains("200 OK")) {
                 return
             }
-
         } catch RTSPError.notConnected {
             print("RTSP error: not connected")
         } catch RTSPError.connectionClosed {

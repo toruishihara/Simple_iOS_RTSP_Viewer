@@ -20,7 +20,7 @@ final class PlayerViewModel: ObservableObject {
         self.statusText = statusText
     }
 
-    func connect(url: String) {
+    func connect(url: String) async {
         statusText = "Connecting..."
         //client?.disconnect()
         rtp = UDPReceiver()
@@ -40,9 +40,9 @@ final class PlayerViewModel: ObservableObject {
             print("rtcp!.start", rtcpPacket)
         }
         client = RTSPClient(urlString: url, rtpPort:51500)
-        client?.connect()
+        await client?.connect()
         //usleep(100_000)  // microseconds
-        client?.start()
+        await client?.start()
         statusText = "Connected"
     }
 
