@@ -75,27 +75,7 @@ final class RTSPClient {
                 try await self.client.connect()
             } catch {
                 print("client.connect failed:", error)
-            }
-            
-            //var readStream: Unmanaged<CFReadStream>?
-            //var writeStream: Unmanaged<CFWriteStream>?
-            
-            //CFStreamCreatePairWithSocketToHost(
-            //    nil,
-            //    host as CFString,
-            //    UInt32(port),
-            //    &readStream,
-            //    &writeStream
-            //)
-            
-            //inputStream = readStream?.takeRetainedValue()
-            //outputStream = writeStream?.takeRetainedValue()
-            
-            //inputStream?.open()
-            //outputStream?.open()
-            
-            //setState(.connected)
-        //}
+            }            
     }
     
     func disconnect() {
@@ -118,88 +98,101 @@ final class RTSPClient {
         let pass = "short"
         let urlStr = "rtsp://192.168.0.120:554/live/ch1"
         
-        let req0 =
+        do {
+            let req0 =
 """
 OPTIONS \(urlStr) RTSP/1.0\r\n
 CSeq: 1\r\n
 User-Agent: \(userAgent)\r\n
 \r\n
 """
-        do {
+            print("req0=\(req0)")
             try await client.send(req0)
-            let resData0 = try await client.readUntil(
-                Data("\r\n\r\n".utf8),
-                timeoutSeconds: 5.0
-            )
-            let res0 = String(decoding: resData0, as: UTF8.self)
-            print("res0=" + res0)
-            if (!res0.contains("200 OK") || !res0.contains("DESCRIBE") || !res0.contains("PLAY")) {
+            let res0 = try await client.readRTSPResponse()
+            print("res0=\(res0.header)")
+            if (!res0.header.contains("200 OK") || !res0.header.contains("DESCRIBE") || !res0.header.contains("PLAY")) {
                 return
             }
+            print("res0 incldues PLAY and DESCRIBE Continue")
+            
             let req1 =
 """
 DESCRIBE \(urlStr) RTSP/1.0\r\n
-CSeq: 3\r\n
+CSeq: 2\r\n
 User-Agent: \(userAgent) \r\n
 Accept: application/sdp\r\n
 \r\n
 """
-
+            print("req1=\(req1)")
             try await client.send(req1)
-            let resData1 = try await client.readUntil(
-                Data("\r\n\r\n".utf8),
-                timeoutSeconds: 5.0
-            )
-            let res1 = String(decoding: resData1, as: UTF8.self)
-            print("res1=" + res1)
-            if (!res1.contains("401")) {
+            let res1 = try await client.readRTSPResponse()
+            print("res1=\(res1.header)")
+            if (!res1.header.contains("401")) {
                 return
             }
-            let params = parseDigestAuth(res1)
+            let params = parseDigestAuth(res1.header)
             if (params.nonce == nil || params.realm == nil) {
                 return
             }
+            print("res1 incldues nonce realm Continue")
+            
             let response2 = digestResponse(username: user, password: pass, realm: params.realm!, nonce: params.nonce!, method: "DESCRIBE", uri: urlStr)
             let req2 =
 """
 DESCRIBE \(urlStr) RTSP/1.0\r\n
-CSeq: 4\r\n
+CSeq: 3\r\n
 Authorization: Digest username="\(user)", realm="\(params.realm!)", nonce="\(params.nonce!)", uri="\(urlStr)", response="\(response2)"\r\n
 User-Agent: \(userAgent)\r\n
 Accept: application/sdp\r\n
 \r\n
 """
+            print("req2=\(req2)")
             try await client.send(req2)
-            let resData2 = try await client.readUntil(
-                Data("\r\n\r\n".utf8),
-                timeoutSeconds: 5.0
-            )
-            let res2 = String(decoding: resData2, as: UTF8.self)
-            print("res2=" + res2)
-            if (!res2.contains("200 OK")) {
+            let res2 = try await client.readRTSPResponse()
+            print("res2 header=\(res2.header)")
+            let body2 = String(decoding: res2.body, as: UTF8.self)
+            print("res2 body=\(body2)")
+            if (!body2.contains("sprop-parameter-sets")) {
+                print("Error no SPS")
                 return
             }
+            print("res2 incldues H264 SPS Continue")
             
             let response3 = digestResponse(username: user, password: pass, realm: params.realm!, nonce: params.nonce!, method: "SETUP", uri: urlStr)
             let req3 =
 """
 SETUP \(urlStr)/track0 RTSP/1.0\r\n
-CSeq: 5\r\n
+CSeq: 4\r\n
 Authorization: Digest username="\(user)", realm="\(params.realm!)", nonce="\(params.nonce!)", uri="\(urlStr)", response="\(response3)"\r\n
 User-Agent: \(userAgent)\r\n
 Transport: RTP/AVP;unicast;client_port=\(rtpPort)-\(rtcpPort)\r\n
 \r\n
 """
+            print("req3=\(req3)")
             try await client.send(req3)
-            let resData3 = try await client.readUntil(
-                Data("\r\n\r\n".utf8),
-                timeoutSeconds: 5.0
-            )
-            let res3 = String(decoding: resData3, as: UTF8.self)
-            print("res3=" + res3)
-            if (!res3.contains("200 OK")) {
+            let res3 = try await client.readRTSPResponse()
+            print("res3 header=\(res3.header)")
+            let sessionID = parseSessionID(res3.header)
+            if (sessionID == nil) {
+                print("sessionID missing in 200 OK")
                 return
             }
+            print("res3 incldues sessionID Continue")
+
+            let response4 = digestResponse(username: user, password: pass, realm: params.realm!, nonce: params.nonce!, method: "PLAY", uri: urlStr)
+            let req4 =
+"""
+PLAY \(urlStr) RTSP/1.0\r\n
+CSeq: 5\r\n
+Authorization: Digest username="\(user)", realm="\(params.realm!)", nonce="\(params.nonce!)", uri="\(urlStr)", response="\(response4)"\r\n
+User-Agent: \(userAgent)\r\n
+Session: \(sessionID!)\r\n
+\r\n
+"""
+            print("req4=\(req4)")
+            try await client.send(req4)
+            let res4 = try await client.readRTSPResponse()
+            print("res4 header=\(res4.header)")
         } catch RTSPError.notConnected {
             print("RTSP error: not connected")
         } catch RTSPError.connectionClosed {
@@ -229,7 +222,35 @@ Transport: RTP/AVP;unicast;client_port=\(rtpPort)-\(rtcpPort)\r\n
         
         return (realm, nonce)
     }
-    
+
+    func parseContentLength(_ headerText: String) -> Int {
+        // "Content-length: 631" or "Content-Length: 631"
+        let lines = headerText.split(separator: "\r\n")
+        for line in lines {
+            if line.lowercased().hasPrefix("content-length:") {
+                let parts = line.split(separator: ":", maxSplits: 1)
+                if parts.count == 2 {
+                    return Int(parts[1].trimmingCharacters(in: .whitespaces)) ?? 0
+                }
+            }
+        }
+        return 0
+    }
+
+    func parseSessionID(_ response: String) -> String? {
+        for line in response.split(separator: "\r\n") {
+            if line.starts(with: "Session:") {
+                // "Session: 6959...; timeout=60;"
+                let value = line
+                    .replacingOccurrences(of: "Session:", with: "")
+                    .trimmingCharacters(in: .whitespacesAndNewlines)
+
+                // ";" より前を取る
+                return value.split(separator: ";").first.map(String.init)
+            }
+        }
+        return nil
+    }
 
     func digestResponse(username: String, password: String, realm: String, nonce: String,
                         method: String, uri: String) -> String {
