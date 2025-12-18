@@ -10,13 +10,18 @@ import CryptoKit
 
 final class RTSPClient {
     private var client: TCPClient
-    private let urlString: String
+
+    private let urlStr  = "rtsp://192.168.0.120:554/live/ch1"
+    private let userAgent = "LibVLC/3"
     private var host = ""
     private var port: Int = 554
     private var path: String = "/"
-    private var username: String?
-    private var password: String?
-    
+    private var user = ""
+    private var pass = ""
+    private var realm = ""
+    private var nonce = ""
+    private var sessionID = ""
+
     private let rtpPort: Int
     private let rtcpPort: Int
     
@@ -43,7 +48,6 @@ final class RTSPClient {
     
 
     init(urlString: String, rtpPort: Int, onState: ((State) -> Void)? = nil) {
-        self.urlString = urlString
         self.rtpPort = rtpPort
         self.rtcpPort = rtpPort + 1
         self.onState = onState
@@ -51,13 +55,13 @@ final class RTSPClient {
             host = url.host ?? ""
             port = url.port ?? 554
             path = url.path.isEmpty ? "/" : url.path
-            username = url.user
-            password = url.password
+            user = url.user!
+            pass = url.password!
             
             print("host:", host)
             print("port:", port)
-            print("user:", username ?? "")
-            print("password:", password ?? "")
+            print("user:", user)
+            print("password:", pass)
             print("path:", path)
             
             client = TCPClient(host: host, port: port)
@@ -92,12 +96,7 @@ final class RTSPClient {
         onState?(s)
     }
         
-    func start() async {
-        let userAgent = "LibVLC/3.0.18 (LIVE555 Streaming Media v2016.11.28)"
-        let user = "long"
-        let pass = "short"
-        let urlStr = "rtsp://192.168.0.120:554/live/ch1"
-        
+    func setupVideo() async -> (sps:Data, pps:Data) {
         do {
             let req0 =
 """
@@ -106,12 +105,12 @@ CSeq: 1\r\n
 User-Agent: \(userAgent)\r\n
 \r\n
 """
-            print("req0=\(req0)")
+            //print("req0=\(req0)")
             try await client.send(req0)
             let res0 = try await client.readRTSPResponse()
-            print("res0=\(res0.header)")
+            //print("res0=\(res0.header)")
             if (!res0.header.contains("200 OK") || !res0.header.contains("DESCRIBE") || !res0.header.contains("PLAY")) {
-                return
+                return (Data(),Data())
             }
             print("res0 incldues PLAY and DESCRIBE Continue")
             
@@ -123,70 +122,94 @@ User-Agent: \(userAgent) \r\n
 Accept: application/sdp\r\n
 \r\n
 """
-            print("req1=\(req1)")
+            //print("req1=\(req1)")
             try await client.send(req1)
             let res1 = try await client.readRTSPResponse()
-            print("res1=\(res1.header)")
+            //print("res1=\(res1.header)")
             if (!res1.header.contains("401")) {
-                return
+                return (Data(),Data())
             }
             let params = parseDigestAuth(res1.header)
             if (params.nonce == nil || params.realm == nil) {
-                return
+                return (Data(),Data())
             }
+            realm = params.realm!
+            nonce = params.nonce!
             print("res1 incldues nonce realm Continue")
             
-            let response2 = digestResponse(username: user, password: pass, realm: params.realm!, nonce: params.nonce!, method: "DESCRIBE", uri: urlStr)
+            let response2 = digestResponse(method: "DESCRIBE", uri: urlStr)
             let req2 =
 """
 DESCRIBE \(urlStr) RTSP/1.0\r\n
 CSeq: 3\r\n
-Authorization: Digest username="\(user)", realm="\(params.realm!)", nonce="\(params.nonce!)", uri="\(urlStr)", response="\(response2)"\r\n
+Authorization: Digest username="\(user)", realm="\(realm)", nonce="\(nonce)", uri="\(urlStr)", response="\(response2)"\r\n
 User-Agent: \(userAgent)\r\n
 Accept: application/sdp\r\n
 \r\n
 """
-            print("req2=\(req2)")
+            //print("req2=\(req2)")
             try await client.send(req2)
             let res2 = try await client.readRTSPResponse()
-            print("res2 header=\(res2.header)")
+            //print("res2 header=\(res2.header)")
             let body2 = String(decoding: res2.body, as: UTF8.self)
-            print("res2 body=\(body2)")
-            if (!body2.contains("sprop-parameter-sets")) {
-                print("Error no SPS")
-                return
+            //print("res2 body=\(body2)")
+            var sps:Data = Data()
+            var pps:Data = Data()
+            for line in body2.split(separator: "\r\n") {
+                //if line.contains("sprop-parameter-sets") {
+                if line.starts(with: "a=fmtp:96") {
+                    print("96line=\(line)")
+                    (sps, pps) = try parseSpropParameterSets(fromFmtpLine: String(line))
+                    print("SPS bytes:", sps.count, "PPS bytes:", pps.count)
+                    print(sps.hexDump())
+                    print(pps.hexDump())
+                    return(sps, pps)
+                }
+            }
+            if (sps.isEmpty || pps.isEmpty) {
+                print("No SPS or PPS in the SDP")
+                return(Data(), Data())
             }
             print("res2 incldues H264 SPS Continue")
-            
-            let response3 = digestResponse(username: user, password: pass, realm: params.realm!, nonce: params.nonce!, method: "SETUP", uri: urlStr)
+            return (sps, pps)
+        } catch RTSPError.notConnected {
+            print("RTSP error: not connected")
+        } catch RTSPError.connectionClosed {
+            print("RTSP error: connection closed")
+        } catch {
+            print("Unexpected error:", error)
+        }
+        return(Data(), Data())
+    }
+    
+    func playVideo() async {
+        do {
+            let response3 = digestResponse(method: "SETUP", uri: urlStr)
             let req3 =
 """
 SETUP \(urlStr)/track0 RTSP/1.0\r\n
 CSeq: 4\r\n
-Authorization: Digest username="\(user)", realm="\(params.realm!)", nonce="\(params.nonce!)", uri="\(urlStr)", response="\(response3)"\r\n
+Authorization: Digest username="\(user)", realm="\(realm)", nonce="\(nonce)", uri="\(urlStr)", response="\(response3)"\r\n
 User-Agent: \(userAgent)\r\n
 Transport: RTP/AVP;unicast;client_port=\(rtpPort)-\(rtcpPort)\r\n
 \r\n
 """
-            print("req3=\(req3)")
             try await client.send(req3)
             let res3 = try await client.readRTSPResponse()
-            print("res3 header=\(res3.header)")
-            let sessionID = parseSessionID(res3.header)
-            if (sessionID == nil) {
+            sessionID = parseSessionID(res3.header)
+            if (sessionID.isEmpty) {
                 print("sessionID missing in 200 OK")
                 return
             }
             print("res3 incldues sessionID Continue")
-
-            let response4 = digestResponse(username: user, password: pass, realm: params.realm!, nonce: params.nonce!, method: "PLAY", uri: urlStr)
+            let response4 = digestResponse(method: "PLAY", uri: urlStr)
             let req4 =
 """
 PLAY \(urlStr) RTSP/1.0\r\n
 CSeq: 5\r\n
-Authorization: Digest username="\(user)", realm="\(params.realm!)", nonce="\(params.nonce!)", uri="\(urlStr)", response="\(response4)"\r\n
+Authorization: Digest username="\(user)", realm="\(realm)", nonce="\(nonce)", uri="\(urlStr)", response="\(response4)"\r\n
 User-Agent: \(userAgent)\r\n
-Session: \(sessionID!)\r\n
+Session: \(sessionID)\r\n
 \r\n
 """
             print("req4=\(req4)")
@@ -237,7 +260,7 @@ Session: \(sessionID!)\r\n
         return 0
     }
 
-    func parseSessionID(_ response: String) -> String? {
+    func parseSessionID(_ response: String) -> String {
         for line in response.split(separator: "\r\n") {
             if line.starts(with: "Session:") {
                 // "Session: 6959...; timeout=60;"
@@ -245,18 +268,56 @@ Session: \(sessionID!)\r\n
                     .replacingOccurrences(of: "Session:", with: "")
                     .trimmingCharacters(in: .whitespacesAndNewlines)
 
-                // ";" より前を取る
-                return value.split(separator: ";").first.map(String.init)
+                return value.split(separator: ";").first.map(String.init)!
             }
         }
-        return nil
+        return ""
     }
 
-    func digestResponse(username: String, password: String, realm: String, nonce: String,
-                        method: String, uri: String) -> String {
-        let ha1 = md5Hex("\(username):\(realm):\(password)")
+    func digestResponse(method: String, uri: String) -> String {
+        let ha1 = md5Hex("\(user):\(realm):\(pass)")
         let ha2 = md5Hex("\(method):\(uri)")
         return md5Hex("\(ha1):\(nonce):\(ha2)")
+    }
+    
+
+    enum SDPParseError: Error {
+        case noSprop
+        case invalidBase64
+    }
+
+    /// Returns (sps, pps) as raw NAL unit bytes (no 0x00000001 prefix).
+    func parseSpropParameterSets(fromFmtpLine line: String) throws -> (Data, Data) {
+        // Find "sprop-parameter-sets=...."
+        guard let range = line.range(of: "sprop-parameter-sets=") else {
+            throw SDPParseError.noSprop
+        }
+        var tail = String(line[range.upperBound...])
+
+        // Cut at ';' if more parameters follow
+        if let semi = tail.firstIndex(of: ";") {
+            tail = String(tail[..<semi])
+        }
+
+        // tail is "BASE64_SPS,BASE64_PPS"
+        let parts = tail.split(separator: ",", omittingEmptySubsequences: true)
+        guard parts.count >= 2 else { throw SDPParseError.noSprop }
+
+        func b64ToData(_ s: Substring) throws -> Data {
+            // Add padding if missing (common in SDP)
+            var str = String(s)
+            let rem = str.count % 4
+            if rem != 0 { str += String(repeating: "=", count: 4 - rem) }
+
+            guard let d = Data(base64Encoded: str) else {
+                throw SDPParseError.invalidBase64
+            }
+            return d
+        }
+
+        let sps = try b64ToData(parts[0])
+        let pps = try b64ToData(parts[1])
+        return (sps, pps)
     }
     
     func md5Hex(_ s: String) -> String {
@@ -355,7 +416,7 @@ Transport: RTP/AVP/UDP;unicast;client_port=51748-51749;server_port=51628-51629;t
  Session: 6959096903166427680
  */
 
-/*
+/* Server -> Client
  RTSP/1.0 200 OK
  CSeq: 6
  Date: Fri, Dec 12 2025 00:55:52 GMT
