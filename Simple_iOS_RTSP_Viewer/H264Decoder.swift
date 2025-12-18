@@ -10,6 +10,12 @@ import VideoToolbox
 import CoreMedia
 
 final class H264Decoder {
+    private var formatDesc: CMVideoFormatDescription?
+    private var session: VTDecompressionSession?
+
+    /// Called on decoded frames (CVPixelBuffer is in the decoder’s output format, usually NV12).
+    var onFrame: ((CVPixelBuffer, CMTime) -> Void)?
+
     enum DecoderError: Error {
         case missingSPSPPS
         case formatDescriptionCreateFailed(OSStatus)
@@ -18,12 +24,6 @@ final class H264Decoder {
         case sampleBufferCreateFailed(OSStatus)
         case decodeFailed(OSStatus)
     }
-
-    private var formatDesc: CMVideoFormatDescription?
-    private var session: VTDecompressionSession?
-
-    /// Called on decoded frames (CVPixelBuffer is in the decoder’s output format, usually NV12).
-    var onFrame: ((CVPixelBuffer, CMTime) -> Void)?
 
     deinit {
         invalidate()

@@ -36,7 +36,16 @@ struct ContentView: View {
 
             Text(vm.statusText)
                 .font(.footnote)
-
+            
+            Group {
+                if let cg = vm.latestImage {
+                    Image(decorative: cg, scale: 1.0)
+                        .resizable()
+                        .scaledToFit()
+                } else {
+                    Text("No video")
+                }
+            }
         }
         .padding()
     }

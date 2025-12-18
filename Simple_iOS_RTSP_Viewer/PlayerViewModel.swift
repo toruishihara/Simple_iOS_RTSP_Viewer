@@ -8,11 +8,14 @@
 import Foundation
 import Combine
 import CoreMedia
+import CoreImage
 
 @MainActor
 final class PlayerViewModel: ObservableObject {
+    @Published var latestImage: CGImage?
     @Published var statusText: String
 
+    private let ciContext = CIContext()
     private var client: RTSPClient?
     private var rtp: RTPH264Receiver?
     private var rtcp: UDPReceiver?
@@ -21,7 +24,6 @@ final class PlayerViewModel: ObservableObject {
     init(statusText: String = "Idle") {
         self.statusText = statusText
     }
-
     func connect(url: String) async {
         do {
             statusText = "Connecting..."
@@ -64,9 +66,13 @@ final class PlayerViewModel: ObservableObject {
             }
             decoder!.onFrame = { [weak self] pixelBuffer, pts in
                 guard let self else { return }
-                // Update published state, or forward to a renderer
-                printPixelBufferInfo(pixelBuffer, pts: pts)
+                Task { @MainActor in self.onDecodedFrame(pixelBuffer, pts: pts) }
             }
+            //decoder!.onFrame = { [weak self] pixelBuffer, pts in
+            //    guard let self else { return }
+                // Update published state, or forward to a renderer
+            //    printPixelBufferInfo(pixelBuffer, pts: pts)
+            //}
             try decoder!.configure(sps: sps, pps: pps)
             await client!.playVideo()
         } catch {
@@ -78,6 +84,16 @@ final class PlayerViewModel: ObservableObject {
         client?.disconnect()
         client = nil
         statusText = "Idle"
+    }
+    
+    func onDecodedFrame(_ pixelBuffer: CVPixelBuffer, pts: CMTime) {
+        let ciImage = CIImage(cvPixelBuffer: pixelBuffer)
+
+        // If rotation/scale needed, apply transform here.
+
+        if let cg = ciContext.createCGImage(ciImage, from: ciImage.extent) {
+            self.latestImage = cg
+        }
     }
     
     func printPixelBufferInfo(_ pixelBuffer: CVPixelBuffer, pts: CMTime) {
