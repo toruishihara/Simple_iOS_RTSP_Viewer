@@ -20,4 +20,4 @@ No VLC. No ffmpeg.
 
 ![Simulator Screen](screenshots/RTSPViewer_iOS1.png)
 
-![Device Screen](screenshots/dev0.png)
+![Device Screen](screenshots/dev0.jpg)
