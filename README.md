@@ -6,9 +6,10 @@ No VLC. No ffmpeg.
 ## Features
 
 - RTSP over TCP
+- WiFi connection with IP Camera
 - Digest authentication
 - RTP H.264 (FU-A supported)
-- VideoToolbox decoding
+- VideoToolbox HW decoding
 - Swift Concurrency (async/await)
 
 ## Connected Camera
@@ -17,5 +18,6 @@ No VLC. No ffmpeg.
 
 ## Screenshot
 
-![Main Screen](screenshots/RTSPViewer_iOS1.png)
+![Simulator Screen](screenshots/RTSPViewer_iOS1.png)
 
+![Device Screen](screenshots/dev0.png)
