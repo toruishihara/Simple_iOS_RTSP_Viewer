@@ -213,8 +213,3 @@ final class RTPH264Receiver {
         }
     }
 }
-
-// MARK: - Data byte indexing helper
-//private extension Data {
-//    subscript(_ i: Int) -> UInt8 { self[self.index(self.startIndex, offsetBy: i)] }
-//}

@@ -17,9 +17,11 @@ final class PlayerViewModel: ObservableObject {
 
     private let ciContext = CIContext()
     private var client: RTSPClient?
-    private var rtp: RTPH264Receiver?
+    private var rtpH264: RTPH264Receiver?
+    private var rtpMJPEG: RTPMJPEGReceiver?
     private var rtcp: UDPReceiver?
-    private var decoder: H264Decoder?
+    private var h264Decoder: H264Decoder?
+    private var mjpegDecoder: MJPEGDecoder?
 
     init(statusText: String = "Idle") {
         self.statusText = statusText
@@ -28,19 +30,7 @@ final class PlayerViewModel: ObservableObject {
         do {
             statusText = "Connecting..."
             
-            rtp = RTPH264Receiver(port: 51500)
-            try rtp!.start() { rtpPacket,ts  in
-                print("VM rtp Packet size=\(rtpPacket.count)")
-                print(rtpPacket.hexDump())
-                let preferredTimescale: CMTimeScale = 1_000_000 // Microsecond precision
-                let cmTime = CMTime(seconds: Double(ts), preferredTimescale: preferredTimescale)
-                do {
-                    try self.decoder!.decodeNAL(rtpPacket, pts: cmTime)
-                } catch {
-                    print("decodeNAL error: \(error)")
-                }
-            }
-            
+
             rtcp = UDPReceiver()
             if (rtcp == nil) {
                 print("RTCP receiver not created")
@@ -56,25 +46,67 @@ final class PlayerViewModel: ObservableObject {
                 return
             }
             await client!.connect()
-            let (sps,pps) = await client!.setupVideo()
-            statusText = "Connected"
-            
-            decoder = H264Decoder()
-            if (decoder == nil) {
-                print("H264Decoder not created")
+            let res =  await client!.setupVideo()
+            if (!res.hasH264 && !res.hasMJPEG) {
+                print("setupVideo error")
                 return
             }
-            decoder!.onFrame = { [weak self] pixelBuffer, pts in
-                guard let self else { return }
-                Task { @MainActor in self.onDecodedFrame(pixelBuffer, pts: pts) }
+            if (res.hasH264) {
+                rtpH264 = RTPH264Receiver(port: 51500)
+                try rtpH264!.start() { rtpPacket,ts  in
+                    print("VM rtp Packet size=\(rtpPacket.count)")
+                    print(rtpPacket.hexDump())
+                    let preferredTimescale: CMTimeScale = 1_000_000 // Microsecond precision
+                    let cmTime = CMTime(seconds: Double(ts), preferredTimescale: preferredTimescale)
+                    do {
+                        try self.h264Decoder!.decodeNAL(rtpPacket, pts: cmTime)
+                    } catch {
+                        print("decodeNAL error: \(error)")
+                    }
+                }
+            } else if (res.hasMJPEG) {
+                rtpMJPEG = RTPMJPEGReceiver(port: 51500)
+                rtpMJPEG!.onJPEGFrame = { [weak self] jpegData, pts in
+                    guard let self else { return }
+                    // background work
+                    Task.detached(priority: .userInitiated) {
+                        do {
+                            let img = try await self.mjpegDecoder!.decodeJPEG(jpegData)
+                            await MainActor.run {
+                                self.latestImage = img
+                            }
+                        } catch {
+                            await MainActor.run {
+                                self.statusText = "Decode failed: \(error)"
+                            }
+                        }
+                    }
+                }
+                try rtpMJPEG!.start()
             }
-            //decoder!.onFrame = { [weak self] pixelBuffer, pts in
-            //    guard let self else { return }
-                // Update published state, or forward to a renderer
-            //    printPixelBufferInfo(pixelBuffer, pts: pts)
-            //}
-            try decoder!.configure(sps: sps, pps: pps)
-            await client!.playVideo()
+
+            statusText = "Connected"
+            
+            if (res.hasH264) {
+                h264Decoder = H264Decoder()
+                if (h264Decoder == nil) {
+                    print("H264Decoder not created")
+                    return
+                }
+                h264Decoder!.onFrame = { [weak self] pixelBuffer, pts in
+                    guard let self else { return }
+                    Task { @MainActor in self.onDecodedFrame(pixelBuffer, pts: pts) }
+                }
+                try h264Decoder!.configure(sps: client!.sps, pps: client!.pps)
+                try await client!.playVideo()
+            } else if (res.hasMJPEG) {
+                mjpegDecoder = MJPEGDecoder()
+                if (mjpegDecoder == nil) {
+                    print("H264Decoder not created")
+                    return
+                }
+                try await client!.playVideo()
+            }
         } catch {
             print("some error failed:", error)
         }

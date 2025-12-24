@@ -11,8 +11,8 @@ import CryptoKit
 final class RTSPClient {
     private var client: TCPClient
 
-    private let urlStr  = "rtsp://192.168.0.120:554/live/ch1"
-    private let userAgent = "LibVLC/3"
+    private var urlStr = ""
+    private var userAgent = "LibVLC/3"
     private var host = ""
     private var port: Int = 554
     private var path: String = "/"
@@ -25,16 +25,19 @@ final class RTSPClient {
     private let rtpPort: Int
     private let rtcpPort: Int
     
-    // e.g. "rtsp://192.168.0.120:554/live/ch1"
     private var rtspURLNoCreds: String {
         "rtsp://\(host):\(port)\(path)"
     }
     
     private(set) var state: State = .idle
     private var onState: ((State) -> Void)?
+    private var needAuth = false
+    private var cseq = 1
+    private var hasH264 = false
+    private var hasMJPEG = false
+    public var sps = Data()
+    public var pps = Data()
     
-    //private var inputStream: InputStream?
-    //private var outputStream: OutputStream?
     enum State {
         case idle
         case connecting
@@ -46,8 +49,8 @@ final class RTSPClient {
         case connectionClosed
     }
     
-
     init(urlString: String, rtpPort: Int, onState: ((State) -> Void)? = nil) {
+        self.urlStr = urlString
         self.rtpPort = rtpPort
         self.rtcpPort = rtpPort + 1
         self.onState = onState
@@ -55,9 +58,9 @@ final class RTSPClient {
             host = url.host ?? ""
             port = url.port ?? 554
             path = url.path.isEmpty ? "/" : url.path
-            user = url.user!
-            pass = url.password!
-            
+            user = url.user ?? ""
+            pass = url.password ?? ""
+ 
             print("host:", host)
             print("port:", port)
             print("user:", user)
@@ -96,12 +99,12 @@ final class RTSPClient {
         onState?(s)
     }
         
-    func setupVideo() async -> (sps:Data, pps:Data) {
+    func setupVideo() async -> (hasH264:Bool, hasMJPEG:Bool) {
         do {
             let req0 =
 """
 OPTIONS \(urlStr) RTSP/1.0\r\n
-CSeq: 1\r\n
+CSeq: \(cseq)\r\n
 User-Agent: \(userAgent)\r\n
 \r\n
 """
@@ -110,14 +113,15 @@ User-Agent: \(userAgent)\r\n
             let res0 = try await client.readRTSPResponse()
             //print("res0=\(res0.header)")
             if (!res0.header.contains("200 OK") || !res0.header.contains("DESCRIBE") || !res0.header.contains("PLAY")) {
-                return (Data(),Data())
+                return (false,false)
             }
             print("res0 incldues PLAY and DESCRIBE Continue")
             
+            cseq = cseq + 1
             let req1 =
 """
 DESCRIBE \(urlStr) RTSP/1.0\r\n
-CSeq: 2\r\n
+CSeq: \(cseq)\r\n
 User-Agent: \(userAgent) \r\n
 Accept: application/sdp\r\n
 \r\n
@@ -126,52 +130,41 @@ Accept: application/sdp\r\n
             try await client.send(req1)
             let res1 = try await client.readRTSPResponse()
             //print("res1=\(res1.header)")
-            if (!res1.header.contains("401")) {
-                return (Data(),Data())
+            if (res1.header.contains("200 OK")) {
+                needAuth = false
+                print("res1 no Auth required. Continue")
+            } else if (res1.header.contains("401")) {
+                needAuth = true
+                let params = parseDigestAuth(res1.header)
+                if (params.nonce == nil || params.realm == nil) {
+                    return (false,false)
+                }
+                realm = params.realm!
+                nonce = params.nonce!
+                print("res1 incldues nonce realm. Continue")
             }
-            let params = parseDigestAuth(res1.header)
-            if (params.nonce == nil || params.realm == nil) {
-                return (Data(),Data())
-            }
-            realm = params.realm!
-            nonce = params.nonce!
-            print("res1 incldues nonce realm Continue")
             
-            let response2 = digestResponse(method: "DESCRIBE", uri: urlStr)
-            let req2 =
-"""
-DESCRIBE \(urlStr) RTSP/1.0\r\n
-CSeq: 3\r\n
-Authorization: Digest username="\(user)", realm="\(realm)", nonce="\(nonce)", uri="\(urlStr)", response="\(response2)"\r\n
-User-Agent: \(userAgent)\r\n
-Accept: application/sdp\r\n
-\r\n
-"""
-            //print("req2=\(req2)")
-            try await client.send(req2)
-            let res2 = try await client.readRTSPResponse()
+            let res2 = try await sendAuthDescribe()
             //print("res2 header=\(res2.header)")
             let body2 = String(decoding: res2.body, as: UTF8.self)
-            //print("res2 body=\(body2)")
+            print("res2 body=\(body2)")
             var sps:Data = Data()
             var pps:Data = Data()
             for line in body2.split(separator: "\r\n") {
                 //if line.contains("sprop-parameter-sets") {
-                if line.starts(with: "a=fmtp:96") {
-                    print("96line=\(line)")
+                if line.starts(with: "m=video 0 RTP/AVP 96") {
+                    hasH264 = true
+                    print("DSP 96 line=\(line)")
                     (sps, pps) = try parseSpropParameterSets(fromFmtpLine: String(line))
                     print("SPS bytes:", sps.count, "PPS bytes:", pps.count)
                     print(sps.hexDump())
                     print(pps.hexDump())
-                    return(sps, pps)
+                }
+                if line.starts(with: "m=video 0 RTP/AVP 26") {
+                    hasMJPEG = true
+                    print("DSP 26 line=\(line)")
                 }
             }
-            if (sps.isEmpty || pps.isEmpty) {
-                print("No SPS or PPS in the SDP")
-                return(Data(), Data())
-            }
-            print("res2 incldues H264 SPS Continue")
-            return (sps, pps)
         } catch RTSPError.notConnected {
             print("RTSP error: not connected")
         } catch RTSPError.connectionClosed {
@@ -179,50 +172,94 @@ Accept: application/sdp\r\n
         } catch {
             print("Unexpected error:", error)
         }
-        return(Data(), Data())
+        if (hasH264 || hasMJPEG) {
+            print("res2 incldues H264 SPS Continue")
+            return (hasH264, hasMJPEG)
+        } else {
+            print("No H264 or MJPEG in the SDP")
+            return (false,false)
+        }
     }
     
-    func playVideo() async {
-        do {
-            let response3 = digestResponse(method: "SETUP", uri: urlStr)
-            let req3 =
+    func sendAuthDescribe() async throws -> (header: String, body: Data) {
+        cseq = cseq + 1
+        let response = digestResponse(method: "DESCRIBE", uri: urlStr)
+        let req =
+"""
+DESCRIBE \(urlStr) RTSP/1.0\r\n
+CSeq: \(cseq)\r\n
+Authorization: Digest username="\(user)", realm="\(realm)", nonce="\(nonce)", uri="\(urlStr)", response="\(response)"\r\n
+User-Agent: \(userAgent)\r\n
+Accept: application/sdp\r\n
+\r\n
+"""
+        //print("sendAuthDescribe req=\(req)")
+        try await client.send(req)
+        let res = try await client.readRTSPResponse()
+        return res
+    }
+    
+    func playVideo() async throws {
+        cseq = cseq + 1
+        let response3 = digestResponse(method: "SETUP", uri: urlStr)
+        let req3 =
 """
 SETUP \(urlStr)/track0 RTSP/1.0\r\n
-CSeq: 4\r\n
+CSeq: \(cseq)\r\n
 Authorization: Digest username="\(user)", realm="\(realm)", nonce="\(nonce)", uri="\(urlStr)", response="\(response3)"\r\n
 User-Agent: \(userAgent)\r\n
 Transport: RTP/AVP;unicast;client_port=\(rtpPort)-\(rtcpPort)\r\n
 \r\n
 """
+        let req3jpeg =
+"""
+SETUP \(urlStr) RTSP/1.0\r\n
+CSeq: \(cseq)\r\n
+User-Agent: \(userAgent)\r\n
+Transport: RTP/AVP;unicast;client_port=\(rtpPort)-\(rtcpPort)\r\n
+\r\n
+"""
+        if (hasH264) {
             try await client.send(req3)
-            let res3 = try await client.readRTSPResponse()
-            sessionID = parseSessionID(res3.header)
-            if (sessionID.isEmpty) {
-                print("sessionID missing in 200 OK")
-                return
-            }
-            print("res3 incldues sessionID Continue")
-            let response4 = digestResponse(method: "PLAY", uri: urlStr)
-            let req4 =
+        } else if (hasMJPEG) {
+            try await client.send(req3jpeg)
+        }
+        let res3 = try await client.readRTSPResponse()
+        sessionID = parseSessionID(res3.header)
+        if (sessionID.isEmpty) {
+            print("sessionID missing error")
+            return
+        }
+        print("res3 incldues sessionID Continue")
+        
+        cseq = cseq + 1
+        let response4 = digestResponse(method: "PLAY", uri: urlStr)
+        let req4 =
 """
 PLAY \(urlStr) RTSP/1.0\r\n
-CSeq: 5\r\n
+CSeq: \(cseq)\r\n
 Authorization: Digest username="\(user)", realm="\(realm)", nonce="\(nonce)", uri="\(urlStr)", response="\(response4)"\r\n
 User-Agent: \(userAgent)\r\n
 Session: \(sessionID)\r\n
 \r\n
 """
-            print("req4=\(req4)")
+        let req4jpeg =
+"""
+PLAY \(urlStr) RTSP/1.0\r\n
+CSeq: \(cseq)\r\n
+User-Agent: \(userAgent)\r\n
+Session: \(sessionID)\r\n
+Range: npt=0.000-\r\n
+\r\n
+"""
+        print("req4=\(req4)")
+        if (hasH264) {
             try await client.send(req4)
-            let res4 = try await client.readRTSPResponse()
-            print("res4 header=\(res4.header)")
-        } catch RTSPError.notConnected {
-            print("RTSP error: not connected")
-        } catch RTSPError.connectionClosed {
-            print("RTSP error: connection closed")
-        } catch {
-            print("Unexpected error:", error)
+        } else if (hasMJPEG) {
+            try await client.send(req4jpeg)
         }
+        let res4 = try await client.readRTSPResponse()
+        print("res4 header=\(res4.header)")
     }
     
     func parseDigestAuth(_ header: String) -> (realm: String?, nonce: String?) {
@@ -326,102 +363,62 @@ Session: \(sessionID)\r\n
     }
 }
 
-
+// ESP32-S3 RTSP camera, https://github.com/rzeldent/esp32cam-rtsp
 // Client -> Server
-//OPTIONS rtsp://192.168.0.120:554/live/ch1 RTSP/1.0
+//OPTIONS rtsp://192.168.0.14:554/mjpeg/1 RTSP/1.0
 //CSeq: 2
 //User-Agent: LibVLC/3.0.18 (LIVE555 Streaming Media v2016.11.28)
-
+//
 // Server -> Client
 //RTSP/1.0 200 OK
-//    CSeq: 2
-//    Date: Fri, Dec 12 2025 00:55:52 GMT
-//    Server: RTSP Server
-//    Public: OPTIONS, DESCRIBE, SETUP, TEARDOWN, PLAY, PAUSE, GET_PARAMETER, SET_PARAMETER
-
+//CSeq: 2
+//Public: DESCRIBE, SETUP, TEARDOWN, PLAY, PAUSE
+//
 // Client -> Server
-//DESCRIBE rtsp://192.168.0.120:554/live/ch1 RTSP/1.0
+//DESCRIBE rtsp://192.168.0.14:554/mjpeg/1 RTSP/1.0
 //CSeq: 3
 //User-Agent: LibVLC/3.0.18 (LIVE555 Streaming Media v2016.11.28)
 //Accept: application/sdp
-
+//
 // Server -> Client
-//RTSP/1.0 401 Unauthorized
-//Server: RTSP Server
+//RTSP/1.0 200 OK
 //CSeq: 3
-//WWW-Authenticate: Digest realm="HHRtspd", nonce="6d99d427676c352fd9d15635e5da608b"
-
+//Date: Thu, Jan 01 1970 00:06:21 GMT
+//Content-Base: rtsp://192.168.0.14:554/mjpeg/1/
+//Content-Type: application/sdp
+//Content-Length: 94
+// (SDP body)
+//v=0
+//o=- 1085377743 1 IN IP4 192.168.0.14
+//s=
+//t=0 0
+//m=video 0 RTP/AVP 26
+//c=IN IP4 0.0.0.0
+//
 // Client -> Server
-//Authorization: Digest username="TuPF7d6h", realm="HHRtspd", nonce="6d99d427676c352fd9d15635e5da608b", uri="rtsp://192.168.0.120:554/live/ch1", response="d64b48e2fba3302a1a7e1f4ad7997cb1"
+//SETUP rtsp://192.168.0.14:554/mjpeg/1/ RTSP/1.0
 //CSeq: 4
 //User-Agent: LibVLC/3.0.18 (LIVE555 Streaming Media v2016.11.28)
-//Accept: application/sdp
-
-/* Server -> Client
- RTSP/1.0 200 OK
- CSeq: 4
- Date: Fri, Dec 12 2025 00:55:52 GMT
- Server: RTSP Server
- Content-type: application/sdp
- Content-length: 631
- 
- v=0
- o=- 1765500952 1765500953 IN IP4 192.168.0.120
- s=streamed by RTSP server
- e=NONE
- b=AS:1088
- t=0 0
- m=video 0 RTP/AVP 96
- c=IN IP4 0.0.0.0
- b=AS:1024
- a=recvonly
- a=x-dimensions:640,360
- a=rtpmap:96 H264/90000
- a=control:track0
- a=fmtp:96 packetization-mode=1;profile-level-id=640016;sprop-parameter-sets=Z2QAFqw7UFAX/LCAAAADAIAAAA9C,aO484QBCQgCEhARMUhuTxXyfk/k/J8nm5MkkLCJCkJyeT6/J/X5PrycmpMA=
- m=audio 0 RTP/AVP 97
- c=IN IP4 0.0.0.0
- b=AS:64
- a=recvonly
- a=control:track1
- a=rtpmap:97 MPEG4-GENERIC/8000/1
- a=fmtp:97 profile-level-id=15;mode=AAC-hbr;sizelength=13;indexlength=3;indexdeltalength=3;config=1588;profile=1;
- */
-
-/* Client -> Server
- SETUP rtsp://192.168.0.120:554/live/ch1/track0 RTSP/1.0
- CSeq: 5
- Authorization: Digest username="TuPF7d6h", realm="HHRtspd", nonce="6d99d427676c352fd9d15635e5da608b", uri="rtsp://192.168.0.120:554/live/ch1", response="3dc93376d770e74d7a6344a3c9bf76c1"
- User-Agent: LibVLC/3.0.18 (LIVE555 Streaming Media v2016.11.28)
- Transport: RTP/AVP;unicast;client_port=51748-51749
- */
-// client listens 51748 for RTP
-// client listens 51749 for RTCP
-
-/* Server -> Client
-RTSP/1.0 200 OK
-CSeq: 5
-Date: Fri, Dec 12 2025 00:55:52 GMT
-Server: RTSP Server
-Session: 6959096903166427680; timeout=60;
-Transport: RTP/AVP/UDP;unicast;client_port=51748-51749;server_port=51628-51629;timeout=60
- */
-
-/* Client -> Server
- SETUP rtsp://192.168.0.120:554/live/ch1/track1 RTSP/1.0
- CSeq: 6
- Authorization: Digest username="TuPF7d6h", realm="HHRtspd", nonce="6d99d427676c352fd9d15635e5da608b", uri="rtsp://192.168.0.120:554/live/ch1", response="3dc93376d770e74d7a6344a3c9bf76c1"
- User-Agent: LibVLC/3.0.18 (LIVE555 Streaming Media v2016.11.28)
- Transport: RTP/AVP;unicast;client_port=55650-55651
- Session: 6959096903166427680
- */
-
-/* Server -> Client
- RTSP/1.0 200 OK
- CSeq: 6
- Date: Fri, Dec 12 2025 00:55:52 GMT
- Server: RTSP Server
- Session: 6959096903166427680; timeout=60;
- Transport: RTP/AVP/UDP;unicast;client_port=55650-55651;server_port=50362-50363;timeout=60
- */
-
+//Transport: RTP/AVP;unicast;client_port=53348-53349
+//
+// Server -> Client
+//RTSP/1.0 200 OK
+//CSeq: 4
+//Date: Thu, Jan 01 1970 00:06:23 GMT
+//Transport: RTP/AVP;unicast;destination=127.0.0.1;source=127.0.0.1;client_port=53348-53349;server_port=6970-6971
+//Session: -2147430019
+//
+// Client -> Server
+//PLAY rtsp://192.168.0.14:554/mjpeg/1/ RTSP/1.0
+//CSeq: 5
+//User-Agent: LibVLC/3.0.18 (LIVE555 Streaming Media v2016.11.28)
+//Session: -2147430019
+//Range: npt=0.000-
+//
+// Server -> Client
+//RTSP/1.0 200 OK
+//CSeq: 5
+//Date: Thu, Jan 01 1970 00:06:24 GMT
+//Range: npt=0.000-
+//Session: -2147430019
+//RTP-Info: url=rtsp://127.0.0.1:8554/mjpeg/1/track1

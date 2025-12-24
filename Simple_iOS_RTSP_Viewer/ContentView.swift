@@ -9,7 +9,8 @@ import SwiftUI
 
 struct ContentView: View {
     @StateObject private var vm = PlayerViewModel()
-    @State var url = "rtsp://long:short@192.168.0.120:554/live/ch1"
+    @State var url = "rtsp://192.168.0.14:554/mjpeg/1"
+    // "rtsp://long:short@192.168.0.120:554/live/ch1"
 
     var body: some View {
         VStack {
