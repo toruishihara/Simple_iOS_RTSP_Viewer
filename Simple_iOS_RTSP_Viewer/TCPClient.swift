@@ -45,7 +45,7 @@ actor TCPClient {
     var enableHexDumpRX = false
     var enableHexDumpTX = false
 
-    init(host: String, port: Int) {
+    init(host: String, port: UInt16) {
         self.host = NWEndpoint.Host(host)
         self.port = NWEndpoint.Port(integerLiteral: UInt16(port))
     }

@@ -14,6 +14,9 @@ import CoreImage
 final class PlayerViewModel: ObservableObject {
     @Published var latestImage: CGImage?
     @Published var statusText: String
+    
+    // RTP port, you can change to any value if open
+    private let RTPPort:UInt16 = 51500
 
     private let ciContext = CIContext()
     private var client: RTSPClient?
@@ -36,11 +39,11 @@ final class PlayerViewModel: ObservableObject {
                 print("RTCP receiver not created")
                 return
             }
-            rtcp!.start(port:51501) { rtcpPacket in
+            rtcp!.start(port:RTPPort + 1) { rtcpPacket in
                 print("rtcp!.start", rtcpPacket)
             }
             
-            client = RTSPClient(urlString: url, rtpPort:51500)
+            client = RTSPClient(urlString: url, rtpPort:RTPPort)
             if (client == nil) {
                 print("RTSPClient not created")
                 return
@@ -52,7 +55,7 @@ final class PlayerViewModel: ObservableObject {
                 return
             }
             if (res.hasH264) {
-                rtpH264 = RTPH264Receiver(port: 51500)
+                rtpH264 = RTPH264Receiver(port: RTPPort)
                 try rtpH264!.start() { rtpPacket,ts  in
                     print("VM rtp Packet size=\(rtpPacket.count)")
                     print(rtpPacket.hexDump())
@@ -65,7 +68,7 @@ final class PlayerViewModel: ObservableObject {
                     }
                 }
             } else if (res.hasMJPEG) {
-                rtpMJPEG = RTPMJPEGReceiver(port: 51500)
+                rtpMJPEG = RTPMJPEGReceiver(port: RTPPort)
                 rtpMJPEG!.onJPEGFrame = { [weak self] jpegData, pts in
                     guard let self else { return }
                     // background work

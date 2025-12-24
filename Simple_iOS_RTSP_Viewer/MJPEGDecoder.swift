@@ -16,16 +16,15 @@ final class MJPEGDecoder {
     
     /// Decode one JPEG frame (Data) into CGImage
     func decodeJPEG(_ jpeg: Data) throws -> CGImage {
-        print("jpeg bytes:", jpeg.count,
-              "SOI:", jpeg.prefix(2).map{ String(format:"%02X",$0) }.joined(),
-              "EOI:", jpeg.suffix(2).map{ String(format:"%02X",$0) }.joined())
-        print("jpeg size=\(jpeg.count)")
-        print(jpeg.hexDump(max:jpeg.count))
+        //print(jpeg.hexDump(max:jpeg.count))
+
         let cfData = jpeg as CFData
         guard let src = CGImageSourceCreateWithData(cfData, nil),
               let img = CGImageSourceCreateImageAtIndex(src, 0, nil) else {
+            print("JPEG decode failed")
             throw DecodeError.invalidJPEG
         }
+        print("JPEG decode success")
         return img
     }
 }

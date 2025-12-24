@@ -14,7 +14,7 @@ final class RTSPClient {
     private var urlStr = ""
     private var userAgent = "LibVLC/3"
     private var host = ""
-    private var port: Int = 554
+    private var port: UInt16 = 554
     private var path: String = "/"
     private var user = ""
     private var pass = ""
@@ -22,8 +22,8 @@ final class RTSPClient {
     private var nonce = ""
     private var sessionID = ""
 
-    private let rtpPort: Int
-    private let rtcpPort: Int
+    private let rtpPort: UInt16
+    private let rtcpPort: UInt16
     
     private var rtspURLNoCreds: String {
         "rtsp://\(host):\(port)\(path)"
@@ -49,14 +49,14 @@ final class RTSPClient {
         case connectionClosed
     }
     
-    init(urlString: String, rtpPort: Int, onState: ((State) -> Void)? = nil) {
+    init(urlString: String, rtpPort: UInt16, onState: ((State) -> Void)? = nil) {
         self.urlStr = urlString
         self.rtpPort = rtpPort
         self.rtcpPort = rtpPort + 1
         self.onState = onState
         if let url = URL(string: urlString) {
             host = url.host ?? ""
-            port = url.port ?? 554
+            port = UInt16(url.port ?? 554)
             path = url.path.isEmpty ? "/" : url.path
             user = url.user ?? ""
             pass = url.password ?? ""

@@ -24,6 +24,12 @@ struct RFC2435Header {
     let height: Int
 }
 
+enum JpegSampling {
+    case yuv422
+    case yuv420
+    case yuv444
+}
+
 final class RTPMJPEGReceiver {
     var onJPEGFrame: ((Data, UInt32) -> Void)?
     enum RTPError: Error { case bindFailed, badPacket }
@@ -39,6 +45,8 @@ final class RTPMJPEGReceiver {
     private var width: Int = 0
     private var height: Int = 0
     private var qTables = Data()
+    
+    private var frameCount: Int = 0
     
     init(port: UInt16) {
         self.port = NWEndpoint.Port(rawValue: port)!
@@ -85,7 +93,6 @@ final class RTPMJPEGReceiver {
         }
     }
     
-    private var s_cnt: Int = 0
     
     // MARK: - RTP + RFC2435 JPEG
     private func handleRTPPacket(_ pkt: Data, onJPEGFrame: (Data, UInt32) -> Void) {
@@ -160,7 +167,7 @@ final class RTPMJPEGReceiver {
         let q    = payload.u8(5)
         let w    = Int(payload.u8(6)) * 8
         let h    = Int(payload.u8(7)) * 8
-        print("RFC2435 off=\(off) w=\(w) h=\(h) q=\(q) ts=\(ts)")
+        //print("RFC2435 off=\(off) w=\(w) h=\(h) q=\(q) ts=\(ts)")
         
         return .init(typeSpecific: ts, fragmentOffset: off, type: type, q: q, width: w, height: h)
     }
@@ -168,7 +175,7 @@ final class RTPMJPEGReceiver {
     func push(payload: Data, rtpTimestamp: UInt32, marker: Bool) throws -> Data? {
         let h = try parseRFC2435Header(payload)
         var idx = 8
-        print("off=\(h.fragmentOffset) w=\(h.width) h=\(h.height) q=\(h.q) marker=\(marker)")
+        //print("off=\(h.fragmentOffset) w=\(h.width) h=\(h.height) q=\(h.q) marker=\(marker)")
 
         // If timestamp is changed, reset frame
         if currentTimestamp != nil, currentTimestamp != rtpTimestamp, h.fragmentOffset != 0 {
@@ -204,8 +211,8 @@ final class RTPMJPEGReceiver {
         frameBuffer.replaceSubrange(off..<off+jpegFragment.count, with: jpegFragment)
         
         if marker {
-            // ここでフレーム確定：RFC2435の情報から JPEGファイルを組み立てる
             let jpegData = buildJPEG(width: width, height: height, qTables: qTables, scanData: frameBuffer, scanDataSize: need)
+            frameCount = frameCount + 1
             reset()
             return jpegData
         }
@@ -224,15 +231,23 @@ final class RTPMJPEGReceiver {
         var out = Data()
 
         out.append(contentsOf:[0xFF, 0xD8]) // SOI
-        out.append(jfifAPP0()) // optional
+        out.append(jfifAPP0())
         out.append(dqtMarker(qTables:qTables))
         out.append(makeSOF0(width: width, height: height, sampling: .yuv422))
 
-        out.append(standardDHT()) // ★これが無いと失敗することが多い
+        out.append(standardDHT())
         out.append(sos())         // Start of Scan
 
         out.append(scanData.subdata(in: 0..<scanDataSize))
-        out.append(contentsOf:[0xFF, 0xD9])  // EOI
+        
+        let b1 = scanData[scanDataSize - 2]
+        let b2 = scanData[scanDataSize - 1]
+        //print("EOI check \(String(format: "%02X", b1)) \(String(format: "%02X", b2))")
+        if (b1 == 0xFF && b2 == 0xD9 ) {
+            //print("EOI already included in scanData")
+        } else {
+            out.append(contentsOf:[0xFF, 0xD9])  // EOI
+        }
         return out
     }
 
@@ -262,11 +277,6 @@ final class RTPMJPEGReceiver {
         return out
     }
 
-    enum JpegSampling {
-        case yuv422
-        case yuv420
-        case yuv444
-    }
 
     func makeSOF0(width: Int, height: Int, sampling: JpegSampling) -> Data {
         // SOF0 payload length = 17 (0x0011)
@@ -298,24 +308,6 @@ final class RTPMJPEGReceiver {
         return d
     }
     
-    private func sof0_old(width: Int, height: Int) -> Data {
-        // Baseline DCT, 3 components (YCbCr), samplingはよくある 4:2:0 を仮置き
-        let w = UInt16(width), h = UInt16(height)
-
-        return Data([
-            0xFF,0xC0, 0x00,0x11,
-            0x08,
-            UInt8(h >> 8), UInt8(h & 0xFF),
-            UInt8(w >> 8), UInt8(w & 0xFF),
-            0x03,        // components
-            0x01, 0x21, 0x00, // Y  (H=2,V=2) QT=0, 4:2:2
-            0x02, 0x11, 0x01, // Cb (H=1,V=1) QT=1
-            0x03, 0x11, 0x01  // Cr (H=1,V=1) QT=1
-        ])
-    }
-
-    /// Standard JPEG Huffman tables (Annex K.3 / "standard" DHT used by many MJPEG streams)
-    /// Returns a complete DHT segment starting with 0xFFC4.
     func standardDHT() -> Data {
         // This is a well-known constant blob used in many MJPEG implementations.
         // It defines: DC Luma (0), AC Luma (0x10), DC Chroma (1), AC Chroma (0x11)
