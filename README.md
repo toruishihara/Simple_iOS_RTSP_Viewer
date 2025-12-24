@@ -15,6 +15,7 @@ No VLC. No ffmpeg.
 ## Connected Camera
 
 - Jennov IP66
+- ESP32-S3 w OV3660, https://github.com/rzeldent/esp32cam-rtsp
 
 ## Screenshot
 
@@ -23,7 +24,7 @@ No VLC. No ffmpeg.
 | ![](screenshots/emu0.png) | ![](screenshots/dev0.jpg) |
 
 
-## Jennov IP66 packets
+## Jennov IP66 RTSP packets
 Client -> Server
 ```
 OPTIONS rtsp://192.168.0.120:554/live/ch1 RTSP/1.0
@@ -133,4 +134,74 @@ Date: Fri, Dec 12 2025 00:55:52 GMT
 Server: RTSP Server
 Session: 6959096903166427680; timeout=60;
 Transport: RTP/AVP/UDP;unicast;client_port=55650-55651;server_port=50362-50363;timeout=60
+```
+
+## esp32cam-rtsp packets
+
+Client -> Server
+```
+OPTIONS rtsp://192.168.0.14:554/mjpeg/1 RTSP/1.0
+CSeq: 2
+User-Agent: LibVLC/3.0.18 (LIVE555 Streaming Media v2016.11.28)
+```
+Server -> Client
+```
+RTSP/1.0 200 OK
+CSeq: 2
+Public: DESCRIBE, SETUP, TEARDOWN, PLAY, PAUSE
+```
+Client -> Server
+```
+DESCRIBE rtsp://192.168.0.14:554/mjpeg/1 RTSP/1.0
+CSeq: 3
+User-Agent: LibVLC/3.0.18 (LIVE555 Streaming Media v2016.11.28)
+Accept: application/sdp
+```
+Server -> Client
+```
+RTSP/1.0 200 OK
+CSeq: 3
+Date: Thu, Jan 01 1970 00:06:21 GMT
+Content-Base: rtsp://192.168.0.14:554/mjpeg/1/
+Content-Type: application/sdp
+Content-Length: 94
+
+v=0
+o=- 1085377743 1 IN IP4 192.168.0.14
+s=
+t=0 0
+m=video 0 RTP/AVP 26
+c=IN IP4 0.0.0.0
+```
+Client -> Server
+```
+SETUP rtsp://192.168.0.14:554/mjpeg/1/ RTSP/1.0
+CSeq: 4
+User-Agent: LibVLC/3.0.18 (LIVE555 Streaming Media v2016.11.28)
+Transport: RTP/AVP;unicast;client_port=53348-53349
+```
+Server -> Client
+```
+RTSP/1.0 200 OK
+CSeq: 4
+Date: Thu, Jan 01 1970 00:06:23 GMT
+Transport: RTP/AVP;unicast;destination=127.0.0.1;source=127.0.0.1;client_port=53348-53349;server_port=6970-6971
+Session: -2147430019
+```
+Client -> Server
+```
+PLAY rtsp://192.168.0.14:554/mjpeg/1/ RTSP/1.0
+CSeq: 5
+User-Agent: LibVLC/3.0.18 (LIVE555 Streaming Media v2016.11.28)
+Session: -2147430019
+Range: npt=0.000-
+```
+Server -> Client
+```
+RTSP/1.0 200 OK
+CSeq: 5
+Date: Thu, Jan 01 1970 00:06:24 GMT
+Range: npt=0.000-
+Session: -2147430019
+RTP-Info: url=rtsp://127.0.0.1:8554/mjpeg/1/track1
 ```
