@@ -99,7 +99,7 @@ final class RTSPClient {
         onState?(s)
     }
         
-    func setupVideo() async -> (hasH264:Bool, hasMJPEG:Bool) {
+    func setupVideo() async -> (hasH264:Bool, hasMJPEG:Bool, sps:Data, pps:Data) {
         do {
             let req0 =
 """
@@ -113,7 +113,7 @@ User-Agent: \(userAgent)\r\n
             let res0 = try await client.readRTSPResponse()
             //print("res0=\(res0.header)")
             if (!res0.header.contains("200 OK") || !res0.header.contains("DESCRIBE") || !res0.header.contains("PLAY")) {
-                return (false,false)
+                return (false,false, Data(), Data())
             }
             print("res0 incldues PLAY and DESCRIBE Continue")
             
@@ -137,7 +137,7 @@ Accept: application/sdp\r\n
                 needAuth = true
                 let params = parseDigestAuth(res1.header)
                 if (params.nonce == nil || params.realm == nil) {
-                    return (false,false)
+                    return (false, false, Data(), Data())
                 }
                 realm = params.realm!
                 nonce = params.nonce!
@@ -151,10 +151,11 @@ Accept: application/sdp\r\n
             var sps:Data = Data()
             var pps:Data = Data()
             for line in body2.split(separator: "\r\n") {
-                //if line.contains("sprop-parameter-sets") {
                 if line.starts(with: "m=video 0 RTP/AVP 96") {
                     hasH264 = true
                     print("DSP 96 line=\(line)")
+                }
+                if line.starts(with: "a=fmtp:96") {
                     (sps, pps) = try parseSpropParameterSets(fromFmtpLine: String(line))
                     print("SPS bytes:", sps.count, "PPS bytes:", pps.count)
                     print(sps.hexDump())
@@ -165,6 +166,10 @@ Accept: application/sdp\r\n
                     print("DSP 26 line=\(line)")
                 }
             }
+            if (hasH264 || hasMJPEG) {
+                print("res2 incldues H264 SPS Continue")
+                return (hasH264, hasMJPEG, sps, pps)
+            }
         } catch RTSPError.notConnected {
             print("RTSP error: not connected")
         } catch RTSPError.connectionClosed {
@@ -172,23 +177,20 @@ Accept: application/sdp\r\n
         } catch {
             print("Unexpected error:", error)
         }
-        if (hasH264 || hasMJPEG) {
-            print("res2 incldues H264 SPS Continue")
-            return (hasH264, hasMJPEG)
-        } else {
-            print("No H264 or MJPEG in the SDP")
-            return (false,false)
-        }
+        print("No H264 or MJPEG in the SDP")
+        return (false, false, Data(), Data())
     }
     
     func sendAuthDescribe() async throws -> (header: String, body: Data) {
         cseq = cseq + 1
-        let response = digestResponse(method: "DESCRIBE", uri: urlStr)
+        let digest = digestLine(method: "DESCRIBE", uri: urlStr)
         let req =
 """
 DESCRIBE \(urlStr) RTSP/1.0\r\n
 CSeq: \(cseq)\r\n
-Authorization: Digest username="\(user)", realm="\(realm)", nonce="\(nonce)", uri="\(urlStr)", response="\(response)"\r\n
+"""
++ digest +
+"""
 User-Agent: \(userAgent)\r\n
 Accept: application/sdp\r\n
 \r\n
@@ -201,29 +203,22 @@ Accept: application/sdp\r\n
     
     func playVideo() async throws {
         cseq = cseq + 1
-        let response3 = digestResponse(method: "SETUP", uri: urlStr)
+        var auth = ""
+        if (needAuth) {
+            auth = digestLine(method: "SETUP", uri: urlStr)
+        }
         let req3 =
 """
 SETUP \(urlStr)/track0 RTSP/1.0\r\n
 CSeq: \(cseq)\r\n
-Authorization: Digest username="\(user)", realm="\(realm)", nonce="\(nonce)", uri="\(urlStr)", response="\(response3)"\r\n
+"""
++ auth +
+"""
 User-Agent: \(userAgent)\r\n
 Transport: RTP/AVP;unicast;client_port=\(rtpPort)-\(rtcpPort)\r\n
 \r\n
 """
-        let req3jpeg =
-"""
-SETUP \(urlStr) RTSP/1.0\r\n
-CSeq: \(cseq)\r\n
-User-Agent: \(userAgent)\r\n
-Transport: RTP/AVP;unicast;client_port=\(rtpPort)-\(rtcpPort)\r\n
-\r\n
-"""
-        if (hasH264) {
-            try await client.send(req3)
-        } else if (hasMJPEG) {
-            try await client.send(req3jpeg)
-        }
+        try await client.send(req3)
         let res3 = try await client.readRTSPResponse()
         sessionID = parseSessionID(res3.header)
         if (sessionID.isEmpty) {
@@ -233,31 +228,23 @@ Transport: RTP/AVP;unicast;client_port=\(rtpPort)-\(rtcpPort)\r\n
         print("res3 incldues sessionID Continue")
         
         cseq = cseq + 1
-        let response4 = digestResponse(method: "PLAY", uri: urlStr)
+        if (needAuth) {
+            auth = digestLine(method: "PLAY", uri: urlStr)
+        }
         let req4 =
 """
 PLAY \(urlStr) RTSP/1.0\r\n
 CSeq: \(cseq)\r\n
-Authorization: Digest username="\(user)", realm="\(realm)", nonce="\(nonce)", uri="\(urlStr)", response="\(response4)"\r\n
-User-Agent: \(userAgent)\r\n
-Session: \(sessionID)\r\n
-\r\n
 """
-        let req4jpeg =
++ auth +
 """
-PLAY \(urlStr) RTSP/1.0\r\n
-CSeq: \(cseq)\r\n
 User-Agent: \(userAgent)\r\n
 Session: \(sessionID)\r\n
 Range: npt=0.000-\r\n
 \r\n
 """
         print("req4=\(req4)")
-        if (hasH264) {
-            try await client.send(req4)
-        } else if (hasMJPEG) {
-            try await client.send(req4jpeg)
-        }
+        try await client.send(req4)
         let res4 = try await client.readRTSPResponse()
         print("res4 header=\(res4.header)")
     }
@@ -311,10 +298,15 @@ Range: npt=0.000-\r\n
         return ""
     }
 
-    func digestResponse(method: String, uri: String) -> String {
+    func digestLine(method: String, uri: String) -> String {
         let ha1 = md5Hex("\(user):\(realm):\(pass)")
         let ha2 = md5Hex("\(method):\(uri)")
-        return md5Hex("\(ha1):\(nonce):\(ha2)")
+        let hash = md5Hex("\(ha1):\(nonce):\(ha2)")
+        
+        return
+"""
+Authorization: Digest username="\(user)", realm="\(realm)", nonce="\(nonce)", uri="\(urlStr)", response="\(hash)"\r\n
+"""
     }
     
 

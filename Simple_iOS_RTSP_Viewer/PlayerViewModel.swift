@@ -57,8 +57,8 @@ final class PlayerViewModel: ObservableObject {
             if (res.hasH264) {
                 rtpH264 = RTPH264Receiver(port: RTPPort)
                 try rtpH264!.start() { rtpPacket,ts  in
-                    print("VM rtp Packet size=\(rtpPacket.count)")
-                    print(rtpPacket.hexDump())
+                    //print("VM rtp Packet size=\(rtpPacket.count)")
+                    //print(rtpPacket.hexDump())
                     let preferredTimescale: CMTimeScale = 1_000_000 // Microsecond precision
                     let cmTime = CMTime(seconds: Double(ts), preferredTimescale: preferredTimescale)
                     do {
@@ -100,7 +100,7 @@ final class PlayerViewModel: ObservableObject {
                     guard let self else { return }
                     Task { @MainActor in self.onDecodedFrame(pixelBuffer, pts: pts) }
                 }
-                try h264Decoder!.configure(sps: client!.sps, pps: client!.pps)
+                try h264Decoder!.configure(sps: res.sps, pps: res.pps)
                 try await client!.playVideo()
             } else if (res.hasMJPEG) {
                 mjpegDecoder = MJPEGDecoder()
